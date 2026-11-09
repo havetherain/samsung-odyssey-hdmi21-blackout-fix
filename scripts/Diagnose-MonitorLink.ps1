@@ -8,6 +8,8 @@
     2. Stock EDID and EDID_OVERRIDE (if present) CTA-861 Extension Block (Block 1).
     3. Dynamic lookup and bit-level decoding of the HDMI Forum Vendor-Specific Data Block (HF-VSDB, OUI D8-5D-C4):
        - Max_FRL_Rate, ALLM, VRRmin / VRRmax, DSC 1.2 capabilities, DSC_Max_FRL_Rate, and Block 1 checksum validation.
+    4. NVIDIA nvlddmkm DisplayDatabase inspection for persistent zombie override binaries:
+       - ScalingConfig, ColorformatConfig, and VideoInfoframeOverride.
 #>
 
 [CmdletBinding()]
@@ -152,6 +154,9 @@ $displayRoot = "HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY"
 $classRoot = "HKLM:\SYSTEM\CurrentControlSet\Control\Class"
 $monitorHwKeys = Get-ChildItem -Path $displayRoot -ErrorAction SilentlyContinue
 
+$foundHfVsdbMonitors = 0
+$patchedMonitors = 0
+
 foreach ($hwKey in $monitorHwKeys) {
     $hwId = $hwKey.PSChildName
     if ($FilterHardwareId -and ($hwId -notlike "*$FilterHardwareId*")) {
@@ -195,12 +200,14 @@ foreach ($hwKey in $monitorHwKeys) {
         Write-Host ("    MaxResolution: {0} | ICMProfile: {1}" -f $maxRes, $icmProfile)
         Write-Host ("    EDID Length  : {0} bytes ({1} blocks)" -f $rawEdid.Length, [math]::Floor($rawEdid.Length / 128))
 
+        $stockInfo = $null
         if ($rawEdid.Length -ge 256) {
             [byte[]]$stockBlock1 = [byte[]]::new(128)
             [Array]::Copy($rawEdid, 128, $stockBlock1, 0, 128)
-            $null = Read-HfVsdbInfo -Block1Bytes $stockBlock1 -Label "Stock EDID Block 1"
+            $stockInfo = Read-HfVsdbInfo -Block1Bytes $stockBlock1 -Label "Registry Cached EDID Block 1"
+            if ($null -ne $stockInfo) { $foundHfVsdbMonitors++ }
         } else {
-            Write-Host "    [Stock EDID Block 1] Not present (EDID is only 128 bytes)" -ForegroundColor DarkGray
+            Write-Host "    [Registry Cached EDID Block 1] Not present (EDID is only 128 bytes)" -ForegroundColor DarkGray
         }
 
         $overrideKeyPath = Join-Path $devParamsPath "EDID_OVERRIDE"
@@ -208,7 +215,11 @@ foreach ($hwKey in $monitorHwKeys) {
             $ovProp1 = Get-ItemProperty -Path $overrideKeyPath -Name "1" -ErrorAction SilentlyContinue
             if ($ovProp1 -and $ovProp1."1") {
                 [byte[]]$ovBlock1 = $ovProp1."1"
-                $null = Read-HfVsdbInfo -Block1Bytes $ovBlock1 -Label "Active EDID_OVERRIDE Block 1"
+                $ovInfo = Read-HfVsdbInfo -Block1Bytes $ovBlock1 -Label "Active EDID_OVERRIDE Block 1"
+                if ($null -ne $ovInfo -and $ovInfo.MaxFrlRate -eq 5 -and $ovInfo.Allm -eq 0 -and $ovInfo.DscMaxFrlRate -eq 5 -and $ovInfo.ChecksumValid) {
+                    $patchedMonitors++
+                    Write-Host "    [Status] 40Gbps (FRL 5) + ALLM Off EDID_OVERRIDE is ACTIVE and VALID." -ForegroundColor Green
+                }
             } else {
                 Write-Host "    [EDID_OVERRIDE] Key exists, but value '1' (Block 1 override) is not set." -ForegroundColor Yellow
             }
@@ -217,3 +228,71 @@ foreach ($hwKey in $monitorHwKeys) {
         }
     }
 }
+
+Write-Host ""
+Write-Host "[2] Inspecting NVIDIA nvlddmkm DisplayDatabase for Zombie Overrides..." -ForegroundColor Yellow
+
+$nvDbPath = "HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\State\DisplayDatabase"
+$zombieTargetNames = @("ScalingConfig", "ColorformatConfig", "VideoInfoframeOverride")
+$zombieFindings = @()
+
+if (Test-Path $nvDbPath) {
+    $dbSubKeys = Get-ChildItem -Path $nvDbPath -ErrorAction SilentlyContinue
+    foreach ($subKey in $dbSubKeys) {
+        $profileName = $subKey.PSChildName
+        if ($profileName -like "ADAPTER_*" -or $profileName -like "CONNECTOR_*" -or $profileName -like "NOEDID_*") {
+            continue
+        }
+
+        if ($FilterHardwareId -and ($profileName -notlike "*$FilterHardwareId*")) {
+            continue
+        }
+
+        $props = Get-ItemProperty -Path $subKey.PSPath -ErrorAction SilentlyContinue
+        $presentZombies = @()
+
+        foreach ($zName in $zombieTargetNames) {
+            if ($props.PSObject.Properties[$zName]) {
+                $val = $props.$zName
+                $hexStr = if ($val -is [byte[]]) { ConvertTo-HexString -Bytes $val } else { "$val" }
+                $presentZombies += [PSCustomObject]@{
+                    Name  = $zName
+                    Value = $hexStr
+                }
+                $zombieFindings += [PSCustomObject]@{
+                    Profile = $profileName
+                    Name    = $zName
+                    Value   = $hexStr
+                }
+            }
+        }
+
+        Write-Host ""
+        Write-Host ("  Monitor Profile : {0}" -f $profileName) -ForegroundColor Cyan
+        if ($presentZombies.Count -eq 0) {
+            Write-Host "    Zombie Keys   : CLEAN (No ScalingConfig / ColorformatConfig / VideoInfoframeOverride)" -ForegroundColor Green
+        } else {
+            foreach ($z in $presentZombies) {
+                Write-Host ("    [!] FOUND     : {0} = {1}" -f $z.Name, $z.Value) -ForegroundColor Red
+            }
+        }
+    }
+} else {
+    Write-Host "  NVIDIA DisplayDatabase path not found ($nvDbPath)." -ForegroundColor DarkGray
+}
+
+Write-Host ""
+Write-Host "==============================================================================" -ForegroundColor White
+Write-Host " Diagnostic Summary" -ForegroundColor White
+Write-Host "==============================================================================" -ForegroundColor White
+Write-Host ("  - HDMI 2.1 HF-VSDB Monitors Detected : {0}" -f $foundHfVsdbMonitors)
+Write-Host ("  - Monitors with 40Gbps + ALLM Patch  : {0}" -f $patchedMonitors)
+Write-Host ("  - NVIDIA DisplayDatabase Zombie Keys : {0}" -f $zombieFindings.Count)
+
+if ($patchedMonitors -gt 0 -and $zombieFindings.Count -eq 0) {
+    Write-Host "  - Overall Status: OPTIMAL (FRL 5 40Gbps + ALLM Off applied, DisplayDatabase clean)" -ForegroundColor Green
+} else {
+    Write-Host "  - Overall Status: ACTION RECOMMENDED (Run scripts\Fix-HDMI21-Blackout.ps1 as Administrator)" -ForegroundColor Yellow
+}
+Write-Host "==============================================================================" -ForegroundColor White
+
