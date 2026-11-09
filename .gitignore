@@ -1,0 +1,17 @@
+# Registry and EDID backups generated locally by scripts
+backups/*.reg
+backups/*.bin
+backups/*.json
+backups/*.txt
+!backups/.gitkeep
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
