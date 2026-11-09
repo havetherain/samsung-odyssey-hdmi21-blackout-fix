@@ -1,10 +1,24 @@
 # 삼성 오디세이 G7 (`S32DG700` / `G70D`) HDMI 2.1 간헐적 화면 꺼짐(블랙아웃/깜빡임) 해결 가이드
 
+[![Latest Release](https://img.shields.io/github/v/release/havetherain/samsung-odyssey-hdmi21-blackout-fix?label=ZIP%20다운로드%20(Releases)&style=for-the-badge&color=blueviolet)](https://github.com/havetherain/samsung-odyssey-hdmi21-blackout-fix/releases/latest)
 [![English Guide](https://img.shields.io/badge/Language-English_Guide_(README.md)-blue?style=for-the-badge)](./README.md)
 [![Technical Deep Dive](https://img.shields.io/badge/Docs-Technical_Deep_Dive-informational?style=for-the-badge)](./docs/technical-deep-dive.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](./LICENSE)
 
 > **삼성 오디세이 G7 (`S32DG700` / `G70D`, 4K 144Hz, 타이젠 OS)** 모니터와 **NVIDIA GeForce RTX 5070 Ti**를 HDMI 2.1로 연결했을 때 발생하던 **간헐적 1 - 2초 화면 꺼짐(블랙아웃/신호 끊김)** 현상을 실제로 해결한 과정과 자동화 PowerShell 스크립트를 공유하는 리포지토리입니다.
+
+---
+
+## 🚀 빠른 시작 (Git 설치 불필요! ZIP 다운로드)
+
+복잡한 Git 명령어(`git clone`)를 사용할 필요가 없습니다:
+1. **[GitHub Releases 최신 버전](https://github.com/havetherain/samsung-odyssey-hdmi21-blackout-fix/releases/latest)** 페이지에서 **`samsung-odyssey-hdmi21-blackout-fix-vX.X.X.zip`** 파일을 다운로드합니다.
+2. 원하는 폴더에 압축을 풉니다.
+3. 마우스 더블 클릭으로 바로 실행할 수 있는 원클릭 실행 파일(`.bat`)을 제공합니다:
+   - **`1-Diagnose.bat`**: 현재 모니터 및 드라이버 링크 상태 읽기 전용 진단 (시스템 변경 없음)
+   - **`2-Apply-Fix.bat`**: 관리자 권한을 자동으로 요청하며, 레지스트리 백업 -> 40Gbps FRL 5 + ALLM Off 패치 -> NVIDIA `DisplayDatabase` 좀비 키 클린업을 자동으로 실행합니다 (드라이버 재시작으로 화면이 2 - 4초간 깜빡입니다).
+   - **`3-Revert-To-Stock.bat`**: 언제든 `EDID_OVERRIDE`를 삭제하고 공장 출고 순정 상태로 즉시 원복합니다.
+4. `2-Apply-Fix.bat` 실행 완료 후 **PC를 1회 재부팅**합니다.
 
 ---
 

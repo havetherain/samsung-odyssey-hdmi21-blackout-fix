@@ -1,10 +1,24 @@
 # Samsung Odyssey G7 (`S32DG700` / `G70D`) HDMI 2.1 Black Screen / Flickering Fix
 
+[![Latest Release](https://img.shields.io/github/v/release/havetherain/samsung-odyssey-hdmi21-blackout-fix?label=Download%20ZIP%20(Release)&style=for-the-badge&color=blueviolet)](https://github.com/havetherain/samsung-odyssey-hdmi21-blackout-fix/releases/latest)
 [![Korean Guide](https://img.shields.io/badge/Language-한국어_가이드_(README.ko.md)-blue?style=for-the-badge)](./README.ko.md)
 [![Technical Deep Dive](https://img.shields.io/badge/Docs-Technical_Deep_Dive-informational?style=for-the-badge)](./docs/technical-deep-dive.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](./LICENSE)
 
 > **Case Study & Automated PowerShell Workaround** for intermittent **1 - 2s HDMI 2.1 blackouts (video signal dropouts)** on the **Samsung Odyssey G7 (`S32DG700` / `G70D`, 4K 144Hz, Tizen OS)** connected to an **NVIDIA GeForce RTX 5070 Ti** (and RTX 40 / 50 series GPUs).
+
+---
+
+## 🚀 Quick Start (No Git Required!)
+
+You do **NOT** need Git installed on your PC:
+1. Go to **[Releases](https://github.com/havetherain/samsung-odyssey-hdmi21-blackout-fix/releases/latest)** and download the latest **`samsung-odyssey-hdmi21-blackout-fix-vX.X.X.zip`**.
+2. Extract the ZIP archive anywhere on your PC.
+3. Double-click the one-click batch launcher files:
+   - **`1-Diagnose.bat`**: Read-only check of your current monitor and driver link status.
+   - **`2-Apply-Fix.bat`**: Automatically requests Administrator rights, creates a registry backup, applies the 40Gbps FRL 5 + ALLM Off EDID patch, and cleans up NVIDIA `DisplayDatabase` zombie keys (screen will flicker for 2 - 4 seconds).
+   - **`3-Revert-To-Stock.bat`**: Immediately deletes the `EDID_OVERRIDE` and restores factory stock behavior at any time.
+4. **Reboot your PC once** after running `2-Apply-Fix.bat`.
 
 ---
 
