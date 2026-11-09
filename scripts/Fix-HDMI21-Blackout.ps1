@@ -11,6 +11,8 @@
        - ALLM             : 1 (Enabled)                     -> 0 (Disabled)                    [0x02 -> 0x00]
        - DSC_Max_FRL_Rate : 6 (48 Gbps / 12 Gbps x 4 lanes) -> 5 (40 Gbps / 10 Gbps x 4 lanes) [0x64 -> 0x54]
     4. Recalculates the CTA-861 Block 1 checksum (Byte 127) and registers it under Device Parameters\EDID_OVERRIDE ("1").
+    5. Temporarily unloads the NVIDIA GPU driver via pnputil /disable-device, purges persistent zombie override binaries
+       (ScalingConfig, ColorformatConfig, VideoInfoframeOverride) from nvlddmkm\State\DisplayDatabase, and re-enables the GPU.
 
 .PARAMETER TargetHardwareId
     Monitor Hardware ID filter. Defaults to "SAME069" (Samsung Odyssey G70D S32DG700 HDMI VRR mode).
@@ -197,3 +199,81 @@ foreach ($hwKey in $hwKeys) {
 if ($patchedCount -eq 0) {
     Write-Warning "No matching HDMI 2.1 HF-VSDB monitor instances were found for filter '$TargetHardwareId'."
 }
+
+# Step 3: Unload NVIDIA GPU via pnputil, Clean DisplayDatabase Zombie Keys, and Reload GPU
+Write-Host ""
+Write-Host "[Step 3] Purging NVIDIA nvlddmkm DisplayDatabase Zombie Overrides..." -ForegroundColor Yellow
+
+$nvDbPath = "HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\State\DisplayDatabase"
+$zombieNames = @("ScalingConfig", "ColorformatConfig", "VideoInfoframeOverride")
+
+$nvGpus = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction SilentlyContinue | Where-Object {
+    $_.PNPDeviceID -like "PCI\VEN_10DE*"
+})
+
+if ($DryRun) {
+    foreach ($gpu in $nvGpus) {
+        Write-Host ("  [DryRun] Would disable NVIDIA GPU: {0} ({1})" -f $gpu.Name, $gpu.PNPDeviceID) -ForegroundColor DarkGray
+    }
+    if (Test-Path $nvDbPath) {
+        Get-ChildItem -Path $nvDbPath -ErrorAction SilentlyContinue | ForEach-Object {
+            $profName = $_.PSChildName
+            if ($profName -like "ADAPTER_*" -or $profName -like "CONNECTOR_*" -or $profName -like "NOEDID_*") { return }
+            $props = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            foreach ($z in $zombieNames) {
+                if ($props.PSObject.Properties[$z]) {
+                    Write-Host ("  [DryRun] Would delete zombie value '{0}' from profile '{1}'" -f $z, $profName) -ForegroundColor DarkGray
+                }
+            }
+        }
+    }
+    foreach ($gpu in $nvGpus) {
+        Write-Host ("  [DryRun] Would re-enable NVIDIA GPU: {0} ({1})" -f $gpu.Name, $gpu.PNPDeviceID) -ForegroundColor DarkGray
+    }
+} else {
+    Write-Host "  Note: Screen will briefly go black for 2 - 4 seconds while the NVIDIA driver unloads and reloads." -ForegroundColor Cyan
+    Start-Sleep -Seconds 1
+
+    try {
+        foreach ($gpu in $nvGpus) {
+            Write-Host ("  Disabling GPU : {0} ({1})..." -f $gpu.Name, $gpu.PNPDeviceID)
+            $null = & pnputil.exe /disable-device "$($gpu.PNPDeviceID)"
+        }
+
+        Start-Sleep -Seconds 2
+
+        if (Test-Path $nvDbPath) {
+            $subKeys = Get-ChildItem -Path $nvDbPath -ErrorAction SilentlyContinue
+            foreach ($subKey in $subKeys) {
+                $profName = $subKey.PSChildName
+                if ($profName -like "ADAPTER_*" -or $profName -like "CONNECTOR_*" -or $profName -like "NOEDID_*") {
+                    continue
+                }
+                if ($TargetHardwareId -ne "*" -and ($profName -notlike "*$TargetHardwareId*")) {
+                    continue
+                }
+
+                $props = Get-ItemProperty -Path $subKey.PSPath -ErrorAction SilentlyContinue
+                foreach ($z in $zombieNames) {
+                    if ($props.PSObject.Properties[$z]) {
+                        Remove-ItemProperty -Path $subKey.PSPath -Name $z -Force -ErrorAction SilentlyContinue
+                        Write-Host ("  Deleted zombie key : {0} from {1}" -f $z, $profName) -ForegroundColor Green
+                    }
+                }
+            }
+        }
+    } finally {
+        Start-Sleep -Seconds 1
+        foreach ($gpu in $nvGpus) {
+            Write-Host ("  Re-enabling GPU: {0} ({1})..." -f $gpu.Name, $gpu.PNPDeviceID)
+            $null = & pnputil.exe /enable-device "$($gpu.PNPDeviceID)"
+        }
+    }
+}
+
+Write-Host ""
+Write-Host "==============================================================================" -ForegroundColor White
+Write-Host " Completed! EDID_OVERRIDE (40Gbps FRL 5 + ALLM Off) & DisplayDatabase Cleanup" -ForegroundColor Green
+Write-Host " Recommended: Perform a clean Windows reboot to ensure full link lock." -ForegroundColor White
+Write-Host "==============================================================================" -ForegroundColor White
+
