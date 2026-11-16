@@ -15,9 +15,9 @@ You do **NOT** need Git installed on your PC:
 1. Go to **[Releases](https://github.com/havetherain/samsung-odyssey-hdmi21-blackout-fix/releases/latest)** and download the latest **`samsung-odyssey-hdmi21-blackout-fix-vX.X.X.zip`**.
 2. Extract the ZIP archive anywhere on your PC.
 3. Double-click the one-click batch launcher files:
-   - **`1-Diagnose.bat`**: Read-only check of your current monitor and driver link status.
-   - **`2-Apply-Fix.bat`**: Automatically requests Administrator rights, creates a registry backup, applies the 40Gbps FRL 5 + ALLM Off EDID patch, and cleans up NVIDIA `DisplayDatabase` zombie keys (screen will flicker for 2 - 4 seconds).
-   - **`3-Revert-To-Stock.bat`**: Immediately deletes the `EDID_OVERRIDE` and restores factory stock behavior at any time.
+   - **`1-Diagnose.bat`**: Read-only check of your current monitor, ghost PnP devices, EDID FRL/ALLM state, and `DisplayDatabase` status.
+   - **`2-Apply-Fix.bat`**: Automatically requests Administrator rights, creates a registry backup, removes disconnected ghost monitors, applies the **32Gbps FRL 4 + ALLM Off** full multi-block EDID patch, stops `NVDisplay.ContainerLocalSystem`, and deep-cleans NVIDIA `DisplayDatabase` / `MonitorDataStore` (screen will flicker for 2 - 4 seconds).
+   - **`3-Revert-To-Stock.bat`**: Immediately deletes `EDID_OVERRIDE`, restores your original cached `EDID` binary from `backups/`, and restores factory stock behavior at any time.
 4. **Reboot your PC once** after running `2-Apply-Fix.bat`.
 
 ---
@@ -71,7 +71,7 @@ Many commonly suggested online "fixes" either had zero effect or actively made t
 
 ## 3. The 3 Core Fixes That Solved the Issue
 
-### Fix 1: EDID HDMI 2.1 HF-VSDB Patch (`48Gbps FRL 6 -> 40Gbps FRL 5` & `ALLM Off`)
+### Fix 1: EDID HDMI 2.1 HF-VSDB Patch (`48Gbps FRL 6 -> 32Gbps FRL 4` & `ALLM Off`)
 In the monitor's (`MONITOR\SAME069`, HDMI VRR mode) 384-byte stock EDID, **Block 1 (CTA-861 Extension Block, Bytes 128 - 255)** contains the **HDMI Forum Vendor-Specific Data Block (HF-VSDB, IEEE OUI `C4-5D-D8`, little-endian `D8 5D C4`)** at local offset **Byte 54 - 67**:
 
 - **Stock HF-VSDB Bytes (Checksum `0xE4`):**
@@ -85,20 +85,20 @@ In the monitor's (`MONITOR\SAME069`, HDMI VRR mode) 384-byte stock EDID, **Block
   - **Byte 12 (`0x64`):** Upper 4 bits `DSC_Max_FRL_Rate = 6` (**48 Gbps** = 12 Gbps x 4 lanes)
 
 - **Root Cause:**
-  At **4K 144Hz 10bpc RGB**, DSC 1.2 visually lossless compression only uses **15 - 18 Gbps** of actual bandwidth. Yet the monitor's stock EDID demands the maximum **48 Gbps (12 Gbps/lane)** clock and **ALLM**. When launching a game or switching modes triggers an ALLM toggle or link re-negotiation, 12 Gbps/lane FRL link training accumulates bit errors and falls into an unstable synchronization state (**Marginal Lock**).
+  At **4K 144Hz 10bpc RGB**, DSC 1.2 visually lossless compression only uses **15 - 18 Gbps** of actual bandwidth. Yet the monitor's stock EDID demands the maximum **48 Gbps (12 Gbps/lane)** clock and **ALLM**. Even stepping down only one tier to **40 Gbps (FRL 5, 10 Gbps/lane)** reduces the per-lane symbol clock by just 16.7%, which can still enter a **Marginal Lock** state when GPU VRAM drops to `810 MHz` (`P5` low-power state) or under gaming thermal/driver timing changes.
 
-- **Solution (`EDID_OVERRIDE` Registration):**
-  Patch the HF-VSDB bytes to **`6D D8 5D C4 01 78 80 5B 00 30 90 C3 54 0B`** (Block 1 Checksum recalculated to **`0x06`**):
-  - **Byte 7:** `0x6B -> 0x5B` (`Max_FRL_Rate = 5`, **40 Gbps** = 10 Gbps x 4 lanes)
+- **Solution (`EDID_OVERRIDE` Multi-Block Registration & Cached EDID Sync):**
+  Patch the HF-VSDB bytes to **`6D D8 5D C4 01 78 80 4B 00 30 90 C3 44 0B`** (Block 1 Checksum recalculated to **`0x26`**):
+  - **Byte 7:** `0x6B -> 0x4B` (`Max_FRL_Rate = 4`, **32 Gbps** = 8 Gbps x 4 lanes, **33.3% per-lane clock reduction**)
   - **Byte 8:** `0x02 -> 0x00` (`ALLM = 0`, blocks Auto Low Latency Mode handshake triggers)
-  - **Byte 12:** `0x64 -> 0x54` (`DSC_Max_FRL_Rate = 5`, **40 Gbps** = 10 Gbps x 4 lanes)
-  - Recalculate the Block 1 checksum at Index 127 (`(256 - (sum % 256)) % 256`) and save the 128-byte Block 1 to `HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY\<MonitorID>\<InstanceID>\Device Parameters\EDID_OVERRIDE` value `"1"` (`REG_BINARY`).
-  - **Full 4K 144Hz 10bpc RGB + VRR (48 - 144Hz) is 100% preserved without any visual loss.**
+  - **Byte 12:** `0x64 -> 0x44` (`DSC_Max_FRL_Rate = 4`, **32 Gbps** = 8 Gbps x 4 lanes)
+  - Recalculate the Block 1 checksum at Index 127 (`(256 - (sum % 256)) % 256`), write all blocks (`"0"`, `"1"`, `"2"`) into `Device Parameters\EDID_OVERRIDE`, and synchronize the cached `Device Parameters\EDID` binary.
+  - **Full 4K 144Hz 10bpc RGB + VRR (48 - 144Hz) is 100% preserved without any visual loss** (32 Gbps provides nearly 2x the 15 - 18 Gbps DSC payload). *(Users who specifically prefer 40 Gbps can pass `-TargetFrlRate 5` to `Fix-HDMI21-Blackout.ps1`.)*
 
-### Fix 2: Permanently Purging Zombie Overrides in NVIDIA `DisplayDatabase`
+### Fix 2: Deep-Cleaning NVIDIA `DisplayDatabase`, `MonitorDataStore` & Ghost Monitors
 - Touching Color Format, Content Type, or GPU Scaling in the NVIDIA Control Panel even once leaves persistent binary values—**`ColorformatConfig`**, **`VideoInfoframeOverride`**, and **`ScalingConfig`**—inside `HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm\State\DisplayDatabase\<MonitorProfile>`, even after clicking "Restore Defaults".
-- If you delete these keys while the NVIDIA driver is running, `nvlddmkm.sys` simply overwrites the Registry with its in-memory cache when shutting down.
-- **Solution:** Temporarily disable the GPU via **`pnputil /disable-device`**, delete `ColorformatConfig`, `VideoInfoframeOverride`, and `ScalingConfig` while the driver is unloaded from memory, and re-enable the GPU via **`pnputil /enable-device`**.
+- Deleting keys while `nvlddmkm.sys` OR the user-mode **`NVDisplay.ContainerLocalSystem`** service is running causes the driver/service to re-write cached scaling entries within seconds of GPU reload, and stale `NOEDID_*` or ghost `SAME068*` (HDMI 2.0) entries can re-pollute mode enumeration.
+- **Solution:** Remove disconnected Ghost Monitor PnP devices (`pnputil /remove-device`), stop **`NVDisplay.ContainerLocalSystem`**, disable the GPU via **`pnputil /disable-device`**, purge stale `SAME068*` profiles and scaling/override binaries across all `DisplayDatabase` profiles (including `NOEDID_*`) and `MonitorDataStore`, then re-enable the GPU and restart **`NVDisplay.ContainerLocalSystem`**.
 
 ### Fix 3: Official Samsung Monitor Driver (`S32DG70xE.inf`) & Auxiliary Setup
 1. **Official Samsung Monitor Driver Matching:**
@@ -128,12 +128,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Diagnose-MonitorLink.ps1
 ```
 
 ### Step 2: Apply the Fix (Run PowerShell as Administrator)
-Automatically backs up your Registry (`backups/`), patches the HF-VSDB to **40 Gbps (FRL 5) + ALLM Off** with recalculated Block 1 checksum, and unloads/reloads the NVIDIA GPU via `pnputil` to permanently purge `DisplayDatabase` zombie overrides:
+Automatically backs up your Registry (`backups/`), removes disconnected ghost monitors, patches the HF-VSDB to **32 Gbps (FRL 4) + ALLM Off** with recalculated Block 1 checksum and multi-block `EDID_OVERRIDE` (`0`, `1`, `2`), stops `NVDisplay.ContainerLocalSystem`, and unloads/reloads the NVIDIA GPU via `pnputil` to deep-clean `DisplayDatabase` & `MonitorDataStore`:
 ```powershell
 # Optional: Preview exact byte changes first without modifying the system
 powershell -ExecutionPolicy Bypass -File .\scripts\Fix-HDMI21-Blackout.ps1 -DryRun
 
-# Apply the fix (Requires Administrator privileges; screen will briefly blink for 2 - 4 seconds)
+# Apply the fix (Default FRL 4 [32Gbps]; pass -TargetFrlRate 5 if you prefer 40Gbps)
 powershell -ExecutionPolicy Bypass -File .\scripts\Fix-HDMI21-Blackout.ps1
 ```
 After running `Fix-HDMI21-Blackout.ps1`, **reboot your PC once** so Windows and `nvlddmkm` initialize cleanly from cold boot with the patched EDID.
@@ -155,7 +155,7 @@ samsung-odyssey-hdmi21-blackout-fix/
 │   └── technical-deep-dive.md      # Byte-level HF-VSDB table & nvlddmkm kernel persistence analysis
 ├── scripts/
 │   ├── Diagnose-MonitorLink.ps1    # Read-only EDID HF-VSDB parser & DisplayDatabase diagnostic tool
-│   ├── Fix-HDMI21-Blackout.ps1     # Automated backup + 40Gbps/ALLM EDID_OVERRIDE + pnputil nvlddmkm cleanup
+│   ├── Fix-HDMI21-Blackout.ps1     # Automated backup + ghost cleanup + 32Gbps/ALLM EDID_OVERRIDE + deep nvlddmkm cleanup
 │   └── Revert-To-Stock.ps1         # Instant removal of EDID_OVERRIDE and driver reload to stock state
 ├── LICENSE                         # MIT License
 ├── README.md                       # English Guide (Main)

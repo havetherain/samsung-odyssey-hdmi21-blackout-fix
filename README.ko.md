@@ -15,9 +15,9 @@
 1. **[GitHub Releases 최신 버전](https://github.com/havetherain/samsung-odyssey-hdmi21-blackout-fix/releases/latest)** 페이지에서 **`samsung-odyssey-hdmi21-blackout-fix-vX.X.X.zip`** 파일을 다운로드합니다.
 2. 원하는 폴더에 압축을 풉니다.
 3. 마우스 더블 클릭으로 바로 실행할 수 있는 원클릭 실행 파일(`.bat`)을 제공합니다:
-   - **`1-Diagnose.bat`**: 현재 모니터 및 드라이버 링크 상태 읽기 전용 진단 (시스템 변경 없음)
-   - **`2-Apply-Fix.bat`**: 관리자 권한을 자동으로 요청하며, 레지스트리 백업 -> 40Gbps FRL 5 + ALLM Off 패치 -> NVIDIA `DisplayDatabase` 좀비 키 클린업을 자동으로 실행합니다 (드라이버 재시작으로 화면이 2 - 4초간 깜빡입니다).
-   - **`3-Revert-To-Stock.bat`**: 언제든 `EDID_OVERRIDE`를 삭제하고 공장 출고 순정 상태로 즉시 원복합니다.
+   - **`1-Diagnose.bat`**: 현재 모니터, 유령(Ghost) 장치, EDID FRL/ALLM 상태 및 `DisplayDatabase` 읽기 전용 진단 (시스템 변경 없음)
+   - **`2-Apply-Fix.bat`**: 관리자 권한을 자동으로 요청하며, 레지스트리 백업 -> 유령 모니터 PnP 제거 -> **32Gbps FRL 4 + ALLM Off** 전체 블록 EDID 패치 -> `NVDisplay.ContainerLocalSystem` 중지 후 `DisplayDatabase`/`MonitorDataStore` 딥 클린업을 자동 실행합니다 (화면이 2 - 4초간 깜빡입니다).
+   - **`3-Revert-To-Stock.bat`**: 언제든 `EDID_OVERRIDE`를 삭제하고 `backups/`의 원본 `EDID` 바이너리를 복원해 공장 출고 순정 상태로 즉시 원복합니다.
 4. `2-Apply-Fix.bat` 실행 완료 후 **PC를 1회 재부팅**합니다.
 
 ---
@@ -71,7 +71,7 @@
 
 ## 3. 실제로 문제를 해결한 3가지 핵심 조치
 
-### 조치 1: EDID 내 HDMI 2.1 HF-VSDB 패치 (`48Gbps FRL 6 -> 40Gbps FRL 5` 안정화 및 `ALLM 차단`)
+### 조치 1: EDID 내 HDMI 2.1 HF-VSDB 패치 (`48Gbps FRL 6 -> 32Gbps FRL 4` 안정화 및 `ALLM 차단`)
 모니터(`MONITOR\SAME069`, HDMI VRR 모드)의 순정 EDID(384바이트) 중 **Block 1(CTA-861 확장 블록, Byte 128 - 255)**의 로컬 오프셋 **Byte 54 - 67**에 위치한 **HDMI Forum VSDB(IEEE OUI `C4-5D-D8`, 리틀 엔디안 `D8 5D C4`)** 원본 바이트는 다음과 같습니다:
 
 - **순정 HF-VSDB 원본 바이트 (Block 1 체크섬 `0xE4`):**
@@ -85,19 +85,20 @@
   - **Byte 12 (`0x64`):** 상위 4비트 `DSC_Max_FRL_Rate = 6` (**48Gbps** = 12Gbps x 4 lanes)
 
 - **원인 분석:**
-  **4K 144Hz 10bpc RGB**는 DSC 1.2 압축 시 실제로 약 **15 - 18Gbps**의 대역폭만 사용함에도, 모니터 순정 EDID가 최고 클럭인 **48Gbps(12Gbps/lane)**와 **ALLM**을 요구합니다. 게임 실행 등으로 ALLM 신호나 모드 재협상이 일어날 때 12Gbps/lane 링크 트레이닝에서 에러가 누적되어 불안정한 동기화(**Marginal Lock**) 상태에 빠지게 됩니다.
+  **4K 144Hz 10bpc RGB**는 DSC 1.2 압축 시 실제로 약 **15 - 18Gbps**의 대역폭만 사용함에도, 모니터 순정 EDID가 최고 클럭인 **48Gbps(12Gbps/lane)**와 **ALLM**을 요구합니다. 기존에 한 단계만 낮춘 **40Gbps(FRL 5, 10Gbps/lane)**는 레인당 클럭이 16.7%만 감소해, GPU가 저전력 `P5` 상태(`810MHz` VRAM)에 머무르거나 드라이버 타이밍(`621.24`)·게임 열 부하가 바뀔 때 여전히 마진 경계(**Marginal Lock**)에 걸릴 수 있습니다.
 
-- **해결 방법 (`EDID_OVERRIDE` 등록):**
-  HF-VSDB 바이트를 **`6D D8 5D C4 01 78 80 5B 00 30 90 C3 54 0B`**(Block 1 체크섬 **`0x06`**)로 수정합니다:
-  - **Byte 7:** `0x6B -> 0x5B` (`Max_FRL_Rate = 5`, **40Gbps** = 10Gbps x 4 lanes)
+- **해결 방법 (전체 블록 `EDID_OVERRIDE` 등록 및 캐시 `EDID` 동기화):**
+  HF-VSDB 바이트를 **`6D D8 5D C4 01 78 80 4B 00 30 90 C3 44 0B`**(Block 1 체크섬 **`0x26`**)로 수정합니다:
+  - **Byte 7:** `0x6B -> 0x4B` (`Max_FRL_Rate = 4`, **32Gbps** = 8Gbps x 4 lanes, **레인당 클럭 33.3% 하향**)
   - **Byte 8:** `0x02 -> 0x00` (`ALLM = 0`, 자동 저지연 모드 신호 차단)
-  - **Byte 12:** `0x64 -> 0x54` (`DSC_Max_FRL_Rate = 5`, **40Gbps** = 10Gbps x 4 lanes)
-  - Block 1의 마지막 바이트(Index 127) 체크섬(`(256 - (합계 % 256)) % 256`)을 재계산하여 `HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY\<모니터ID>\<인스턴스ID>\Device Parameters\EDID_OVERRIDE`의 `"1"`(`REG_BINARY`)에 저장합니다.
-  - **결과:** **4K 144Hz 10bpc RGB 무손실 화질 및 VRR(48 - 144Hz)이 100% 그대로 유지**되면서 12Gbps/lane 오버클럭성 링크 트레이닝 에러와 ALLM 재협상 트리거가 원천 차단됩니다.
+  - **Byte 12:** `0x64 -> 0x44` (`DSC_Max_FRL_Rate = 4`, **32Gbps** = 8Gbps x 4 lanes)
+  - Block 1의 마지막 바이트(Index 127) 체크섬(`(256 - (합계 % 256)) % 256`)을 재계산하여 `Device Parameters\EDID_OVERRIDE`에 전체 블록(`"0"`, `"1"`, `"2"`)을 등록하고 `Device Parameters\EDID` 캐시 바이너리도 함께 동기화합니다.
+  - **결과:** **4K 144Hz 10bpc RGB 무손실 화질 및 VRR(48 - 144Hz)이 100% 그대로 유지**되면서(32Gbps는 실제 필요량 15 - 18Gbps의 약 2배) 훨씬 넓은 신호 여유 마진을 확보합니다. *(40Gbps를 원하시면 `-TargetFrlRate 5` 옵션을 지정할 수 있습니다.)*
 
-### 조치 2: NVIDIA 드라이버 내부 `DisplayDatabase`의 좀비 오버라이드 데이터 영구 삭제
-- NVIDIA 제어판에서 컬러 설정, 콘텐츠 유형, 스케일링을 한 번이라도 건드리면 이후 '기본값'으로 돌려놓아도 `HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm\State\DisplayDatabase\<모니터프로필>`에 **`ColorformatConfig`**, **`VideoInfoframeOverride`**, **`ScalingConfig`** 바이너리가 지워지지 않고 남아 모드 전환 시마다 깜빡임을 유발합니다.
-- 드라이버가 켜져 있을 때 레지스트리에서 지우면 드라이버 종료/재부팅 시 커널 메모리 캐시가 다시 레지스트리에 덮어써지므로, 반드시 **`pnputil /disable-device`로 GPU를 잠시 비활성화한 상태에서 해당 레지스트리 값들을 삭제하고 `pnputil /enable-device`로 다시 켜서** 영구 삭제해야 합니다.
+### 조치 2: NVIDIA `DisplayDatabase`·`MonitorDataStore` 딥 클린업 및 유령 장치 제거
+- NVIDIA 제어판에서 컬러 설정, 콘텐츠 유형, 스케일링을 한 번이라도 건드리면 이후 '기본값'으로 돌려놓아도 `HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm\State\DisplayDatabase\<모니터프로필>`에 **`ColorformatConfig`**, **`VideoInfoframeOverride`**, **`ScalingConfig`** 바이너리가 남아 모드 전환 시마다 깜빡임을 유발합니다.
+- 특히 `nvlddmkm.sys` 커널 드라이버뿐만 아니라 사용자 모드 **`NVDisplay.ContainerLocalSystem`** 서비스가 켜진 상태에서 삭제하면 GPU 재활성화 수 초 만에 캐시 값이 다시 덮어써지며, 비활성 유령(`SAME068*`) 및 `NOEDID_*` 프로필이 재오염을 일으킵니다.
+- **해결 방법:** 연결 해제된 유령 모니터 PnP 장치를 제거(`pnputil /remove-device`)한 뒤, **`NVDisplay.ContainerLocalSystem` 서비스를 중지**하고 **`pnputil /disable-device`로 GPU를 언로드**한 상태에서 `DisplayDatabase`(모든 프로필 및 `NOEDID_*` 포함)와 `MonitorDataStore`의 잔존 `SAME068*` 프로필·스케일링/오버라이드 값을 완전히 정리한 뒤 GPU와 서비스를 재시작합니다.
 
 ### 조치 3: 삼성 공식 모니터 드라이버(`S32DG70xE.inf`) 정식 매칭 및 부가 설정
 1. **삼성 공식 모니터 드라이버 설치 및 유령(Ghost) 장치 제거:**
@@ -127,12 +128,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Diagnose-MonitorLink.ps1
 ```
 
 ### 2단계: 패치 및 클린업 자동 적용 (PowerShell 관리자 권한 실행 필수)
-레지스트리 및 원본 EDID를 `backups/` 폴더에 자동 백업한 뒤, EDID 내 HF-VSDB를 동적으로 찾아 **40Gbps(FRL 5) + ALLM Off 패치 및 체크섬 재계산**을 수행하고, `pnputil`로 GPU를 잠시 언로드하여 NVIDIA `DisplayDatabase` 좀비 키를 영구 삭제합니다:
+레지스트리 및 원본 EDID를 `backups/` 폴더에 자동 백업하고 유령 모니터 PnP 장치를 제거한 뒤, EDID 내 HF-VSDB를 동적으로 찾아 **32Gbps(FRL 4) + ALLM Off 패치 및 전체 블록(`0`, `1`, `2`) 등록**을 수행하고, `NVDisplay.ContainerLocalSystem` 중지 + `pnputil` GPU 언로드 상태에서 `DisplayDatabase`·`MonitorDataStore`를 딥 클린업합니다:
 ```powershell
 # (선택) 실제 수정 전 바이트 변경 내역만 안전하게 미리보기
 powershell -ExecutionPolicy Bypass -File .\scripts\Fix-HDMI21-Blackout.ps1 -DryRun
 
-# 실제 패치 적용 (관리자 권한 필요 / GPU 드라이버 재시작 중 2 - 4초간 화면이 깜빡입니다)
+# 실제 패치 적용 (기본 FRL 4 [32Gbps]; 40Gbps를 원하면 -TargetFrlRate 5 지정)
 powershell -ExecutionPolicy Bypass -File .\scripts\Fix-HDMI21-Blackout.ps1
 ```
 스크립트 실행이 완료되면 **PC를 1회 재부팅**하여 콜드 부팅 상태에서 패치된 EDID로 링크가 고정되도록 합니다.
@@ -154,7 +155,7 @@ samsung-odyssey-hdmi21-blackout-fix/
 │   └── technical-deep-dive.md      # EDID HF-VSDB 바이트 구조 비교표 및 nvlddmkm DisplayDatabase 심층 분석 문서
 ├── scripts/
 │   ├── Diagnose-MonitorLink.ps1    # 읽기 전용 EDID HF-VSDB 파서 및 DisplayDatabase 좀비 키 진단 스크립트
-│   ├── Fix-HDMI21-Blackout.ps1     # 자동 백업 + 40Gbps/ALLM EDID_OVERRIDE 등록 + pnputil DisplayDatabase 클린업
+│   ├── Fix-HDMI21-Blackout.ps1     # 자동 백업 + 유령 장치 제거 + 32Gbps/ALLM EDID_OVERRIDE + DisplayDatabase 딥 클린업
 │   └── Revert-To-Stock.ps1         # EDID_OVERRIDE 즉시 삭제 및 드라이버 재시작 순정 복구 스크립트
 ├── LICENSE                         # MIT 라이선스
 ├── README.md                       # 영문 메인 가이드 (English Guide)
