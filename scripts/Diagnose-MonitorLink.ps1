@@ -4,12 +4,13 @@
 
 .DESCRIPTION
     Inspects active/registered DISPLAY devices in the Windows Registry without modifying the system:
-    1. Monitor Hardware ID, Driver matching status (Generic PnP vs Samsung Official INF), MaxResolution, and ICMProfile.
-    2. Stock EDID and EDID_OVERRIDE (if present) CTA-861 Extension Block (Block 1).
-    3. Dynamic lookup and bit-level decoding of the HDMI Forum Vendor-Specific Data Block (HF-VSDB, OUI D8-5D-C4):
-       - Max_FRL_Rate, ALLM, VRRmin / VRRmax, DSC 1.2 capabilities, DSC_Max_FRL_Rate, and Block 1 checksum validation.
-    4. NVIDIA nvlddmkm DisplayDatabase inspection for persistent zombie override binaries:
-       - ScalingConfig, ColorformatConfig, and VideoInfoframeOverride.
+    1. PnP Monitor status check for disconnected Ghost Monitor devices (e.g., stale HDMI 2.0 SAME068 or duplicate UID0).
+    2. Monitor Hardware ID, Driver matching status (Generic PnP vs Samsung Official INF), MaxResolution, and ICMProfile.
+    3. Registry Cached EDID and EDID_OVERRIDE (Blocks 0, 1, 2) inspection.
+    4. Dynamic lookup and bit-level decoding of the HDMI Forum Vendor-Specific Data Block (HF-VSDB, OUI D8-5D-C4):
+       - Max_FRL_Rate (accepting FRL 4 [32 Gbps] and FRL 5 [40 Gbps]), ALLM, VRRmin / VRRmax, DSC 1.2, and Checksum.
+    5. NVIDIA nvlddmkm DisplayDatabase inspection distinguishing critical zombie overrides (ColorformatConfig,
+       VideoInfoframeOverride, stale SAME068* profiles, non-default ScalingConfig) from driver-default ScalingConfig.
 #>
 
 [CmdletBinding()]
@@ -33,8 +34,8 @@ function Get-FrlRateDescription {
         1 { return "1 (9 Gbps = 3 Gbps x 3 lanes)" }
         2 { return "2 (18 Gbps = 6 Gbps x 3 lanes)" }
         3 { return "3 (24 Gbps = 6 Gbps x 4 lanes)" }
-        4 { return "4 (32 Gbps = 8 Gbps x 4 lanes)" }
-        5 { return "5 (40 Gbps = 10 Gbps x 4 lanes) [Recommended Stable Target]" }
+        4 { return "4 (32 Gbps = 8 Gbps x 4 lanes) [Recommended High-Margin Stable Target]" }
+        5 { return "5 (40 Gbps = 10 Gbps x 4 lanes) [Stable Target]" }
         6 { return "6 (48 Gbps = 12 Gbps x 4 lanes) [Stock Maximum - Marginal Lock Risk]" }
         default { return "$FrlCode (Reserved/Unknown)" }
     }
@@ -58,7 +59,6 @@ function Find-HfVsdbOffset {
     param([byte[]]$BlockBytes)
     if (-not $BlockBytes -or $BlockBytes.Length -lt 128) { return -1 }
 
-    # Search CTA-861 Data Block Collection (bytes 4 to dtdStart-1, or full 128-byte block fallback)
     for ($i = 4; $i -le ($BlockBytes.Length - 11); $i++) {
         if ($BlockBytes[$i + 1] -eq 0xD8 -and $BlockBytes[$i + 2] -eq 0x5D -and $BlockBytes[$i + 3] -eq 0xC4) {
             $header = $BlockBytes[$i]
@@ -83,7 +83,6 @@ function Read-HfVsdbInfo {
         return $null
     }
 
-    # Verify Block 1 checksum
     $sum = 0
     for ($i = 0; $i -lt 127; $i++) {
         $sum += [int]$Block1Bytes[$i]
@@ -148,7 +147,23 @@ Write-Host " Mode: Read-Only System Inspection (No Registry Modifications)" -For
 Write-Host "==============================================================================" -ForegroundColor White
 Write-Host ""
 
-Write-Host "[1] Inspecting DISPLAY Registry Entries & Monitor Driver Status..." -ForegroundColor Yellow
+Write-Host "[1] Checking PnP Monitor Devices (Active vs Disconnected Ghost Monitors)..." -ForegroundColor Yellow
+$allPnpMonitors = @(Get-PnpDevice -Class Monitor -ErrorAction SilentlyContinue)
+$ghostMonitors = @($allPnpMonitors | Where-Object {
+    $_.Status -ne "OK" -and (-not $FilterHardwareId -or $_.InstanceId -like "*$FilterHardwareId*")
+})
+$activeMonitors = @($allPnpMonitors | Where-Object { $_.Status -eq "OK" })
+$activeSame068 = @($activeMonitors | Where-Object { $_.InstanceId -like "*SAME068*" })
+
+foreach ($m in $activeMonitors) {
+    Write-Host ("  [OK]    {0} ({1})" -f $m.InstanceId, $m.FriendlyName) -ForegroundColor Green
+}
+foreach ($g in $ghostMonitors) {
+    Write-Host ("  [GHOST] {0} ({1}, Status={2})" -f $g.InstanceId, $g.FriendlyName, $g.Status) -ForegroundColor Red
+}
+
+Write-Host ""
+Write-Host "[2] Inspecting DISPLAY Registry Entries & Monitor Driver Status..." -ForegroundColor Yellow
 
 $displayRoot = "HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY"
 $classRoot = "HKLM:\SYSTEM\CurrentControlSet\Control\Class"
@@ -156,6 +171,7 @@ $monitorHwKeys = Get-ChildItem -Path $displayRoot -ErrorAction SilentlyContinue
 
 $foundHfVsdbMonitors = 0
 $patchedMonitors = 0
+$frl32Monitors = 0
 
 foreach ($hwKey in $monitorHwKeys) {
     $hwId = $hwKey.PSChildName
@@ -212,13 +228,17 @@ foreach ($hwKey in $monitorHwKeys) {
 
         $overrideKeyPath = Join-Path $devParamsPath "EDID_OVERRIDE"
         if (Test-Path $overrideKeyPath) {
+            $ovBlocks = @((Get-Item $overrideKeyPath).Property | Sort-Object)
+            Write-Host ("    [EDID_OVERRIDE Blocks Present] : {0}" -f ($ovBlocks -join ", ")) -ForegroundColor Cyan
             $ovProp1 = Get-ItemProperty -Path $overrideKeyPath -Name "1" -ErrorAction SilentlyContinue
             if ($ovProp1 -and $ovProp1."1") {
                 [byte[]]$ovBlock1 = $ovProp1."1"
                 $ovInfo = Read-HfVsdbInfo -Block1Bytes $ovBlock1 -Label "Active EDID_OVERRIDE Block 1"
-                if ($null -ne $ovInfo -and $ovInfo.MaxFrlRate -eq 5 -and $ovInfo.Allm -eq 0 -and $ovInfo.DscMaxFrlRate -eq 5 -and $ovInfo.ChecksumValid) {
+                if ($null -ne $ovInfo -and $ovInfo.MaxFrlRate -in @(4, 5) -and $ovInfo.Allm -eq 0 -and $ovInfo.DscMaxFrlRate -eq $ovInfo.MaxFrlRate -and $ovInfo.ChecksumValid) {
                     $patchedMonitors++
-                    Write-Host "    [Status] 40Gbps (FRL 5) + ALLM Off EDID_OVERRIDE is ACTIVE and VALID." -ForegroundColor Green
+                    $bwText = if ($ovInfo.MaxFrlRate -eq 4) { "32Gbps (FRL 4)" } else { "40Gbps (FRL 5)" }
+                    if ($ovInfo.MaxFrlRate -eq 4) { $frl32Monitors++ }
+                    Write-Host ("    [Status] {0} + ALLM Off EDID_OVERRIDE is ACTIVE and VALID." -f $bwText) -ForegroundColor Green
                 }
             } else {
                 Write-Host "    [EDID_OVERRIDE] Key exists, but value '1' (Block 1 override) is not set." -ForegroundColor Yellow
@@ -230,51 +250,63 @@ foreach ($hwKey in $monitorHwKeys) {
 }
 
 Write-Host ""
-Write-Host "[2] Inspecting NVIDIA nvlddmkm DisplayDatabase for Zombie Overrides..." -ForegroundColor Yellow
+Write-Host "[3] Inspecting NVIDIA nvlddmkm DisplayDatabase for Zombie & Stale Overrides..." -ForegroundColor Yellow
 
 $nvDbPath = "HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\State\DisplayDatabase"
-$zombieTargetNames = @("ScalingConfig", "ColorformatConfig", "VideoInfoframeOverride")
-$zombieFindings = @()
+$defaultScalingHex = "DB 02 00 00 10 00 00 00 00 01 00 00 EE 00 00 00"
+$criticalValueNames = @("ColorformatConfig", "VideoInfoframeOverride")
+$criticalFindings = @()
+$defaultScalingNotes = @()
 
 if (Test-Path $nvDbPath) {
     $dbSubKeys = Get-ChildItem -Path $nvDbPath -ErrorAction SilentlyContinue
     foreach ($subKey in $dbSubKeys) {
         $profileName = $subKey.PSChildName
-        if ($profileName -like "ADAPTER_*" -or $profileName -like "CONNECTOR_*" -or $profileName -like "NOEDID_*") {
+        if ($profileName -like "ADAPTER_*" -or $profileName -like "CONNECTOR_*") {
             continue
         }
 
-        if ($FilterHardwareId -and ($profileName -notlike "*$FilterHardwareId*")) {
+        if ($FilterHardwareId -and $profileName -notlike "NOEDID_*" -and ($profileName -notlike "*$FilterHardwareId*")) {
             continue
         }
 
         $props = Get-ItemProperty -Path $subKey.PSPath -ErrorAction SilentlyContinue
-        $presentZombies = @()
+        if ($null -eq $props) { continue }
 
-        foreach ($zName in $zombieTargetNames) {
-            if ($props.PSObject.Properties[$zName]) {
-                $val = $props.$zName
+        Write-Host ""
+        Write-Host ("  Profile : {0}" -f $profileName) -ForegroundColor Cyan
+
+        if ($profileName -like "SAME068*" -and $activeSame068.Count -eq 0) {
+            $criticalFindings += [PSCustomObject]@{ Profile = $profileName; Name = "(Stale SAME068 Profile)"; Value = "Ghost HDMI 2.0 profile still cached" }
+            Write-Host "    [!] STALE GHOST PROFILE : SAME068 (HDMI 2.0) profile remains in DisplayDatabase" -ForegroundColor Red
+        }
+
+        $hasCriticalInProfile = $false
+        foreach ($cName in $criticalValueNames) {
+            if ($props.PSObject.Properties[$cName]) {
+                $val = $props.$cName
                 $hexStr = if ($val -is [byte[]]) { ConvertTo-HexString -Bytes $val } else { "$val" }
-                $presentZombies += [PSCustomObject]@{
-                    Name  = $zName
-                    Value = $hexStr
-                }
-                $zombieFindings += [PSCustomObject]@{
-                    Profile = $profileName
-                    Name    = $zName
-                    Value   = $hexStr
-                }
+                $criticalFindings += [PSCustomObject]@{ Profile = $profileName; Name = $cName; Value = $hexStr }
+                $hasCriticalInProfile = $true
+                Write-Host ("    [!] CRITICAL ZOMBIE     : {0} = {1}" -f $cName, $hexStr) -ForegroundColor Red
             }
         }
 
-        Write-Host ""
-        Write-Host ("  Monitor Profile : {0}" -f $profileName) -ForegroundColor Cyan
-        if ($presentZombies.Count -eq 0) {
-            Write-Host "    Zombie Keys   : CLEAN (No ScalingConfig / ColorformatConfig / VideoInfoframeOverride)" -ForegroundColor Green
-        } else {
-            foreach ($z in $presentZombies) {
-                Write-Host ("    [!] FOUND     : {0} = {1}" -f $z.Name, $z.Value) -ForegroundColor Red
+        if ($props.PSObject.Properties["ScalingConfig"]) {
+            $scVal = $props.ScalingConfig
+            $scHex = if ($scVal -is [byte[]]) { ConvertTo-HexString -Bytes $scVal } else { "$scVal" }
+            if ($scHex -eq $defaultScalingHex) {
+                $defaultScalingNotes += [PSCustomObject]@{ Profile = $profileName; Value = $scHex }
+                Write-Host ("    [Info] Driver Default   : ScalingConfig = {0}" -f $scHex) -ForegroundColor Gray
+            } else {
+                $criticalFindings += [PSCustomObject]@{ Profile = $profileName; Name = "ScalingConfig (Custom Override)"; Value = $scHex }
+                $hasCriticalInProfile = $true
+                Write-Host ("    [!] CUSTOM OVERRIDE     : ScalingConfig = {0}" -f $scHex) -ForegroundColor Red
             }
+        }
+
+        if (-not $hasCriticalInProfile -and -not ($profileName -like "SAME068*" -and $activeSame068.Count -eq 0)) {
+            Write-Host "    Status                  : CLEAN (No Colorformat / VideoInfoframe / Custom Scaling zombies)" -ForegroundColor Green
         }
     }
 } else {
@@ -285,14 +317,19 @@ Write-Host ""
 Write-Host "==============================================================================" -ForegroundColor White
 Write-Host " Diagnostic Summary" -ForegroundColor White
 Write-Host "==============================================================================" -ForegroundColor White
+Write-Host ("  - Disconnected Ghost Monitors        : {0}" -f $ghostMonitors.Count)
 Write-Host ("  - HDMI 2.1 HF-VSDB Monitors Detected : {0}" -f $foundHfVsdbMonitors)
-Write-Host ("  - Monitors with 40Gbps + ALLM Patch  : {0}" -f $patchedMonitors)
-Write-Host ("  - NVIDIA DisplayDatabase Zombie Keys : {0}" -f $zombieFindings.Count)
+Write-Host ("  - Monitors with FRL 4/5 + ALLM Off   : {0} (FRL 4 [32Gbps]: {1})" -f $patchedMonitors, $frl32Monitors)
+Write-Host ("  - Critical DisplayDatabase Issues    : {0}" -f $criticalFindings.Count)
+Write-Host ("  - Driver-Default ScalingConfig Info  : {0}" -f $defaultScalingNotes.Count)
 
-if ($patchedMonitors -gt 0 -and $zombieFindings.Count -eq 0) {
-    Write-Host "  - Overall Status: OPTIMAL (FRL 5 40Gbps + ALLM Off applied, DisplayDatabase clean)" -ForegroundColor Green
+if ($patchedMonitors -gt 0 -and $criticalFindings.Count -eq 0 -and $ghostMonitors.Count -eq 0) {
+    if ($frl32Monitors -gt 0) {
+        Write-Host "  - Overall Status: OPTIMAL (FRL 4 32Gbps + ALLM Off applied, no ghost monitors, DisplayDatabase clean)" -ForegroundColor Green
+    } else {
+        Write-Host "  - Overall Status: GOOD (FRL 5 40Gbps active; consider upgrading to FRL 4 [32Gbps] for higher clock margin)" -ForegroundColor Cyan
+    }
 } else {
     Write-Host "  - Overall Status: ACTION RECOMMENDED (Run scripts\Fix-HDMI21-Blackout.ps1 as Administrator)" -ForegroundColor Yellow
 }
 Write-Host "==============================================================================" -ForegroundColor White
-
